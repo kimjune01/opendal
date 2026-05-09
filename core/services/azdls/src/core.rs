@@ -534,3 +534,84 @@ impl AzdlsCore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_decode_roundtrip() {
+        let mut metadata = HashMap::new();
+        metadata.insert("key1".to_string(), "value1".to_string());
+        metadata.insert("key2".to_string(), "value2".to_string());
+
+        let encoded = encode_properties(&metadata);
+        let decoded = decode_properties(&encoded);
+        assert_eq!(metadata, decoded);
+    }
+
+    #[test]
+    fn test_decode_standard_pair() {
+        // "value" base64-encoded is "dmFsdWU="
+        let decoded = decode_properties("key=dmFsdWU=");
+        assert_eq!(decoded.get("key"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_encode_decode_unicode_value() {
+        let mut metadata = HashMap::new();
+        metadata.insert("name".to_string(), "hello world".to_string());
+
+        let encoded = encode_properties(&metadata);
+        let decoded = decode_properties(&encoded);
+        assert_eq!(decoded.get("name"), Some(&"hello world".to_string()));
+    }
+
+    #[test]
+    fn test_encode_decode_value_with_comma_and_equals() {
+        let mut metadata = HashMap::new();
+        metadata.insert("data".to_string(), "a=1,b=2".to_string());
+
+        let encoded = encode_properties(&metadata);
+        let decoded = decode_properties(&encoded);
+        assert_eq!(decoded.get("data"), Some(&"a=1,b=2".to_string()));
+    }
+
+    #[test]
+    fn test_decode_empty_header() {
+        let decoded = decode_properties("");
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_decode_malformed_base64_skipped() {
+        // Malformed base64 is silently skipped, consistent with other services'
+        // best-effort metadata parsing.
+        let decoded = decode_properties("key=!!!invalid!!!");
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_decode_no_equals_skipped() {
+        let decoded = decode_properties("keyonly");
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_encode_empty_metadata() {
+        let metadata = HashMap::new();
+        let encoded = encode_properties(&metadata);
+        assert!(encoded.is_empty());
+    }
+
+    #[test]
+    fn test_decode_multiple_pairs() {
+        let mut expected = HashMap::new();
+        expected.insert("a".to_string(), "1".to_string());
+        expected.insert("b".to_string(), "2".to_string());
+
+        let encoded = encode_properties(&expected);
+        let decoded = decode_properties(&encoded);
+        assert_eq!(expected, decoded);
+    }
+}
