@@ -15,9 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use http::HeaderName;
 use http::HeaderValue;
 use http::Request;
@@ -38,8 +41,43 @@ const X_MS_RENAME_SOURCE: &str = "x-ms-rename-source";
 const X_MS_VERSION: &str = "x-ms-version";
 pub const X_MS_VERSION_ID: &str = "x-ms-version-id";
 const X_MS_CONTINUATION: &str = "x-ms-continuation";
+const X_MS_PROPERTIES: &str = "x-ms-properties";
 pub const DIRECTORY: &str = "directory";
 pub const FILE: &str = "file";
+
+/// Encode user metadata into the `x-ms-properties` header format.
+///
+/// ADLS Gen2 uses a comma-separated list of `name=base64(value)` pairs.
+/// Ref: <https://learn.microsoft.com/en-us/rest/api/storageservices/datalakestoragegen2/path/create>
+pub fn encode_properties(metadata: &HashMap<String, String>) -> String {
+    metadata
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, BASE64.encode(v)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Decode the `x-ms-properties` response header into a `HashMap`.
+///
+/// The header value is a comma-separated list of `name=base64(value)` pairs.
+/// Ref: <https://learn.microsoft.com/en-us/rest/api/storageservices/datalakestoragegen2/path/get-properties>
+pub fn decode_properties(header: &str) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+    if header.is_empty() {
+        return result;
+    }
+    for pair in header.split(',') {
+        let pair = pair.trim();
+        if let Some((key, encoded_value)) = pair.split_once('=') {
+            if let Ok(decoded) = BASE64.decode(encoded_value) {
+                if let Ok(value) = String::from_utf8(decoded) {
+                    result.insert(key.to_string(), value);
+                }
+            }
+        }
+    }
+    result
+}
 
 pub struct AzdlsCore {
     pub info: Arc<AccessorInfo>,
@@ -157,6 +195,12 @@ impl AzdlsCore {
 
         if let Some(v) = args.if_none_match() {
             req = req.header(IF_NONE_MATCH, v)
+        }
+
+        if let Some(user_metadata) = args.user_metadata() {
+            if !user_metadata.is_empty() {
+                req = req.header(X_MS_PROPERTIES, encode_properties(user_metadata));
+            }
         }
 
         let operation = if resource == DIRECTORY {
@@ -285,8 +329,10 @@ impl AzdlsCore {
             .trim_end_matches('/')
             .to_string();
 
+        // Use Get Properties without `action=getStatus` to retrieve both
+        // system-defined and user-defined properties (x-ms-properties header).
         let url = format!(
-            "{}/{}/{}?action=getStatus",
+            "{}/{}/{}",
             self.endpoint,
             self.filesystem,
             percent_encode_path(&p)
@@ -316,6 +362,13 @@ impl AzdlsCore {
 
         if let Some(version_id) = parse_header_to_str(headers, X_MS_VERSION_ID)? {
             meta.set_version(version_id);
+        }
+
+        if let Some(properties) = parse_header_to_str(headers, X_MS_PROPERTIES)? {
+            let user_metadata = decode_properties(properties);
+            if !user_metadata.is_empty() {
+                meta = meta.with_user_metadata(user_metadata);
+            }
         }
 
         let resource = resp
